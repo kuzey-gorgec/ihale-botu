@@ -306,7 +306,6 @@ def classify_with_ollama(prompt: str) -> str | None:
 
 def classify_with_groq(prompt: str) -> str | None:
     api_key = os.getenv("GROQ_API_KEY")
-    print(f"  [debug] GROQ_API_KEY tanimli mi: {bool(api_key)} (uzunluk: {len(api_key) if api_key else 0})")
     if not api_key:
         return None
     try:
@@ -316,14 +315,19 @@ def classify_with_groq(prompt: str) -> str | None:
             json={
                 "model": GROQ_MODEL,
                 "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 20,
+                # gpt-oss modelleri "reasoning" modeli - cevabi vermeden once
+                # ic diyalog icin token harciyor, dusuk max_tokens bu asamada
+                # kesilip bos content donmesine sebep oluyordu.
+                "max_tokens": 300,
                 "temperature": 0,
             },
             timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        content = data["choices"][0]["message"]["content"]
+        print(f"  [debug] Groq yaniti uzunlugu: {len(content) if content else 0}, icerik: {content!r}")
+        return content
     except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
         _print_http_error("Groq", exc)
         return None
