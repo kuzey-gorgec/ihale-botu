@@ -325,16 +325,7 @@ def classify_with_groq(prompt: str) -> str | None:
         )
         resp.raise_for_status()
         data = resp.json()
-        choice = data["choices"][0]
-        message = choice["message"]
-        content = message.get("content")
-        print(f"  [debug] Groq finish_reason={choice.get('finish_reason')} "
-              f"message_keys={list(message.keys())} content_len={len(content) if content else 0}")
-        if not content:
-            for key in ("reasoning", "reasoning_content"):
-                if message.get(key):
-                    print(f"  [debug] Groq {key} (ilk 300 karakter): {message[key][:300]!r}")
-        return content
+        return data["choices"][0]["message"]["content"]
     except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
         _print_http_error("Groq", exc)
         return None
