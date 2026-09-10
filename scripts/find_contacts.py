@@ -24,6 +24,9 @@ Kullanim:
   python scripts/find_contacts.py --company-id 5                 # tek bir sirket, sadece rol bazli arama
   python scripts/find_contacts.py --company-id 5 --website https://firma.de   # + genel iletisim de dene
   python scripts/find_contacts.py --dry-run --limit 3            # DB'ye yazmadan sadece goster
+  python scripts/find_contacts.py --find-company-phones --limit 10   # SADECE sirketlerin genel
+                                                                       # telefonunu bul (opsiyonel,
+                                                                       # kisi aramasi yapmaz)
 
   --auto-website  toplu modda (--company-id verilmeden) her sirket icin
                   once resmi web sitesini SerpAPI genel aramasiyla (site:
@@ -61,31 +64,34 @@ EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
 PHONE_RE = re.compile(r"(\+49[\s/\-]?\(?0?\)?[\d][\d\s/\-]{7,}\d)|(\b0\d{2,5}[\s/\-]\d{3,}[\s/\-]?\d{0,}\b)")
 
 
-def serp_search(query: str, num: int = 5) -> list[dict]:
-    """SerpAPI uzerinden gercek Google arama sonucu doner (title/link/snippet).
-    API anahtari her cagrida taze okunuyor (modul-seviyesi sabit degil) -
-    boylece dashboard.py gibi calisma anindan sonra os.environ'a yazan bir
-    cagiran da dogru anahtari kullanabiliyor."""
+def _serpapi_request(params: dict) -> dict:
+    """SerpAPI'ye ham istek atar, tum yaniti (organic_results disinda
+    knowledge_graph vb. de) doner. API anahtari her cagrida taze okunuyor
+    (modul-seviyesi sabit degil) - boylece dashboard.py gibi calisma
+    anindan sonra os.environ'a yazan bir cagiran da dogru anahtari
+    kullanabiliyor."""
     api_key = os.getenv("SERPAPI_API_KEY", "")
     if not api_key:
-        return []
-    params = {
-        "q": query, "api_key": api_key, "engine": "google",
-        "num": num, "hl": "de", "gl": "de",
-    }
+        return {}
+    full_params = {**params, "api_key": api_key, "engine": "google", "hl": "de", "gl": "de"}
     try:
-        resp = requests.get(SERPAPI_URL, params=params, timeout=20)
+        resp = requests.get(SERPAPI_URL, params=full_params, timeout=20)
         resp.raise_for_status()
     except requests.RequestException as exc:
         print(f"    [HATA] SerpAPI sorgusu basarisiz: {exc}")
         if getattr(exc, "response", None) is not None:
             print(f"    yanit: {exc.response.text[:300]}")
-        return []
+        return {}
     data = resp.json()
     if "error" in data:
         print(f"    [HATA] SerpAPI: {data['error']}")
-        return []
-    return data.get("organic_results", [])
+        return {}
+    return data
+
+
+def serp_search(query: str, num: int = 5) -> list[dict]:
+    """SerpAPI uzerinden gercek Google arama sonucu doner (title/link/snippet)."""
+    return _serpapi_request({"q": query, "num": num}).get("organic_results", [])
 
 
 def extract_contact_from_page(url: str) -> dict:
@@ -187,6 +193,109 @@ def find_role_contacts(company_name: str) -> list[dict]:
             })
         time.sleep(1)
     return results
+
+
+def discover_company_phone(company_name: str, website: str | None = None, log=print) -> str | None:
+    """Kisiye ozel degil, sirketin GENEL (santral/resepsiyon) telefon numarasini
+    bulmaya calisir. Kisi bazli telefon bulmanin cogunlukla sonucsuz kalmasi
+    uzerine eklendi - once SerpAPI'nin Google 'isletme bilgi kutusu'
+    (knowledge_graph) sonucundaki telefonu dener, bu genelde tek sorguda ve
+    sayfa hic cekmeden calisiyor. Orada yoksa, biliniyorsa resmi siteyi
+    (+ /impressum, /kontakt) telefon icin tarar."""
+    data = _serpapi_request({"q": company_name, "num": 3})
+    kg_phone = (data.get("knowledge_graph") or {}).get("phone")
+    if kg_phone:
+        log(f"  Telefon (Google bilgi kutusu): {kg_phone}")
+        return kg_phone.strip()
+
+    if website:
+        contact = extract_contact_from_page(website)
+        if contact.get("phone"):
+            log(f"  Telefon ({website} taranarak): {contact['phone']}")
+            return contact["phone"]
+
+    log("  Telefon bulunamadi (bilgi kutusunda yok, site taramasi da sonucsuz/site bilinmiyor).")
+    return None
+
+
+def get_companies_needing_phone(cur, limit: int) -> list[tuple]:
+    cur.execute(
+        """
+        SELECT DISTINCT c.id, c.name, c.website
+        FROM companies c
+        JOIN tender_companies tc ON tc.company_id = c.id
+        WHERE c.phone IS NULL OR c.phone = ''
+        ORDER BY c.id DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    return cur.fetchall()
+
+
+def update_company_phone(cur, company_id: int, phone: str) -> None:
+    cur.execute("UPDATE companies SET phone = %s WHERE id = %s", (phone, company_id))
+
+
+def save_company_website(cur, company_id: int, website: str) -> None:
+    cur.execute(
+        "UPDATE companies SET website = %s WHERE id = %s AND (website IS NULL OR website = '')",
+        (website, company_id),
+    )
+
+
+def run_find_company_phones(limit: int = 10, company_id: int | None = None,
+                             dry_run: bool = False, log=print) -> dict:
+    """SADECE sirket bazli GENEL telefon bulur - kisi aramasi (find_role_contacts)
+    yapmaz. Bilerek run_find_contacts'tan AYRI ve OPSIYONEL bir akis: her
+    taramada otomatik calismiyor, ekstra SerpAPI sorgusu harcadigi icin
+    dashboard'dan (ya da --find-company-phones ile CLI'dan) elle tetiklenmesi
+    gerekiyor."""
+    if not os.getenv("SERPAPI_API_KEY"):
+        raise RuntimeError(
+            "SERPAPI_API_KEY tanimli degil. Bu dosyanin ustundeki docstring'de ucretsiz "
+            "kurulum adimlari var - .env dosyana (ya da Streamlit secrets'a) ekleyip tekrar dene."
+        )
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL tanimli degil (.env dosyasina ya da Streamlit secrets'a bak)")
+
+    conn = psycopg2.connect(database_url)
+    cur = conn.cursor()
+    try:
+        if company_id:
+            cur.execute("SELECT id, name, website FROM companies WHERE id = %s", (company_id,))
+            row = cur.fetchone()
+            companies = [row] if row else []
+        else:
+            companies = get_companies_needing_phone(cur, limit)
+
+        if not companies:
+            log("Telefonu eksik sirket yok (hepsinde zaten telefon var ya da id bulunamadi).")
+            return {"companies_processed": 0, "phones_found": 0}
+
+        found = 0
+        for cid, name, website in companies:
+            log(f"\n--- {name} (id={cid})")
+            if not website:
+                website = discover_official_website(name)
+                if website and not dry_run:
+                    save_company_website(cur, cid, website)
+                    conn.commit()
+            phone = discover_company_phone(name, website, log=log)
+            if phone:
+                found += 1
+                if not dry_run:
+                    update_company_phone(cur, cid, phone)
+                    conn.commit()
+            time.sleep(1)
+
+        log(f"\nToplam bulunan telefon: {found}")
+        return {"companies_processed": len(companies), "phones_found": found}
+    finally:
+        cur.close()
+        conn.close()
 
 
 def get_companies_needing_contacts(cur, limit: int) -> list[tuple]:
@@ -327,14 +436,20 @@ def main() -> None:
                          help="--company-id ile birlikte: sirketin resmi sitesi, genel iletisim icin denenir")
     parser.add_argument("--auto-website", action="store_true",
                          help="toplu modda her sirket icin resmi siteyi otomatik kesfetmeyi dener")
+    parser.add_argument("--find-company-phones", action="store_true",
+                         help="kisi aramasi yapmaz, sadece sirketlerin GENEL telefonunu bulmayi "
+                              "dener (opsiyonel, ayri SerpAPI sorgusu harcar)")
     parser.add_argument("--dry-run", action="store_true", help="DB'ye yazmadan sadece goster")
     args = parser.parse_args()
 
     try:
-        run_find_contacts(
-            limit=args.limit, company_id=args.company_id, website=args.website,
-            dry_run=args.dry_run, auto_discover_website=args.auto_website,
-        )
+        if args.find_company_phones:
+            run_find_company_phones(limit=args.limit, company_id=args.company_id, dry_run=args.dry_run)
+        else:
+            run_find_contacts(
+                limit=args.limit, company_id=args.company_id, website=args.website,
+                dry_run=args.dry_run, auto_discover_website=args.auto_website,
+            )
     except RuntimeError as exc:
         sys.exit(f"HATA: {exc}")
 

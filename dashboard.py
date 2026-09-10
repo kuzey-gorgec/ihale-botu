@@ -208,7 +208,7 @@ def load_winners() -> pd.DataFrame:
     query = """
         SELECT
             tc.tender_id, c.id AS company_id, c.name AS winner_name, c.email,
-            c.phone, c.address, c.nuts_code
+            c.phone, c.address, c.nuts_code, c.website
         FROM tender_companies tc
         JOIN companies c ON c.id = tc.company_id
         WHERE tc.role = 'winner'
@@ -500,6 +500,43 @@ with tab_ihaleler:
     )
 
     st.subheader("Kazananlar / iletişim bilgileri")
+
+    with st.expander("📞 Eksik şirket telefonlarını SerpAPI ile bulmayı dene (opsiyonel)"):
+        st.caption(
+            "Kişi bazlı telefon bulmak genelde sonuçsuz kalıyor - bunun yerine şirketin genel "
+            "(santral) telefonunu önce Google'ın işletme bilgi kutusundan, yoksa (varsa/bulunursa) "
+            "resmi sitesinden bulmayı dener. Bu, **her taramada otomatik çalışmaz** - ekstra SerpAPI "
+            "sorgusu harcadığı için elle, istediğin an tetiklersin."
+        )
+        phone_limit = st.number_input(
+            "Kaç şirket işlensin (üst sınır)", min_value=1, max_value=100, value=10, key="phone_limit",
+        )
+        if st.button("📞 Eksik telefonları bul", key="find_company_phones_btn"):
+            _ensure_env_vars()
+            logs: list[str] = []
+            result = None
+            error_msg = None
+            try:
+                result = find_contacts.run_find_company_phones(
+                    limit=int(phone_limit), dry_run=False, log=logs.append,
+                )
+            except RuntimeError as exc:
+                error_msg = f"Telefon bulma başarısız: {exc}"
+            st.session_state["last_phone_log"] = "\n".join(logs)
+            st.session_state["last_phone_error"] = error_msg
+            if result is not None:
+                st.session_state["last_phone_summary"] = result
+                load_winners.clear()
+            st.rerun()
+
+        if st.session_state.get("last_phone_error"):
+            st.error(st.session_state["last_phone_error"])
+        if "last_phone_summary" in st.session_state:
+            r = st.session_state["last_phone_summary"]
+            st.success(f"{r['companies_processed']} şirket işlendi, {r['phones_found']} tanesinde telefon bulundu.")
+        if "last_phone_log" in st.session_state:
+            st.code(st.session_state.get("last_phone_log", ""), language=None)
+
     if filtered.empty:
         st.info("Filtreye uyan ihale yok.")
     else:
@@ -733,19 +770,23 @@ with tab_mail_taslaklari:
         _ensure_env_vars()
         logs: list[str] = []
         result = None
+        error_msg = None
         with st.spinner("Taslaklar üretiliyor (LLM çağrısı yapılıyor, biraz sürebilir)..."):
             try:
                 result = generate_drafts.run_generate_drafts(
                     limit=int(draft_limit), dry_run=False, log=logs.append,
                 )
             except RuntimeError as exc:
-                st.error(f"Taslak üretimi başarısız: {exc}")
+                error_msg = f"Taslak üretimi başarısız: {exc}"
         st.session_state["last_draft_log"] = "\n".join(logs)
+        st.session_state["last_draft_error"] = error_msg
         if result is not None:
             st.session_state["last_draft_summary"] = result
             load_drafts.clear()
         st.rerun()
 
+    if st.session_state.get("last_draft_error"):
+        st.error(st.session_state["last_draft_error"])
     if "last_draft_summary" in st.session_state:
         st.success(f"Son üretim: {st.session_state['last_draft_summary']['generated']} yeni taslak oluşturuldu.")
     if "last_draft_log" in st.session_state:
@@ -867,6 +908,7 @@ with tab_yeni_tarama:
         _ensure_env_vars()
         logs: list[str] = []
         ingest_summary = contacts_summary = None
+        error_msgs: list[str] = []
         with st.spinner("İhaleler TED'den çekiliyor, XML parse ediliyor ve sınıflandırılıyor..."):
             try:
                 ingest_summary = ted_ingest.run_ingest(
@@ -874,7 +916,7 @@ with tab_yeni_tarama:
                     place_code=place_code, dry_run=False, log=logs.append,
                 )
             except RuntimeError as exc:
-                st.error(f"İhale taraması başarısız: {exc}")
+                error_msgs.append(f"İhale taraması başarısız: {exc}")
 
         if ingest_summary is not None and do_contacts:
             with st.spinner("Kazanan/ihale veren şirketler için kişi aranıyor..."):
@@ -884,9 +926,10 @@ with tab_yeni_tarama:
                         auto_discover_website=auto_website, log=logs.append,
                     )
                 except RuntimeError as exc:
-                    st.error(f"Kişi araması başarısız: {exc}")
+                    error_msgs.append(f"Kişi araması başarısız: {exc}")
 
         st.session_state["last_scan_log"] = "\n".join(logs)
+        st.session_state["last_scan_error"] = "\n".join(error_msgs) if error_msgs else None
         st.session_state["last_scan_summary"] = {
             "ingest": ingest_summary, "contacts": contacts_summary,
         }
@@ -894,6 +937,9 @@ with tab_yeni_tarama:
         load_winners.clear()
         load_contacts.clear()
         st.rerun()
+
+    if st.session_state.get("last_scan_error"):
+        st.error(st.session_state["last_scan_error"])
 
     if "last_scan_summary" in st.session_state:
         summary = st.session_state["last_scan_summary"]
