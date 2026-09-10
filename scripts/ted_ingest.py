@@ -333,21 +333,24 @@ def normalize_label(raw: str) -> str:
     return "alakasiz"
 
 
-def _print_http_error(label: str, exc: Exception) -> None:
+def _print_http_error(label: str, exc: Exception, log=print) -> None:
     """HTTPError ise sunucunun donduğu govdeyi de yazdir - sadece status kodu
     yeterli tanı bilgisi vermiyor (orn. 'model bulunamadi' vs 'gecersiz model
-    id' ikisi de 404 donebiliyor)."""
+    id' ikisi de 404 donebiliyor). `log` verilmezse normal print() davranisi
+    korunur (CLI); dashboard.py kendi log listesini verip yakalayabiliyor -
+    daha once bu fonksiyon hep print() kullaniyordu ve dashboard'dan
+    calistirildiginda bu hata mesajlari kullaniciya hic gorunmuyordu."""
     resp = getattr(exc, "response", None)
     if resp is not None:
         body = resp.text.strip()
         if len(body) > 300:
             body = body[:300] + "..."
-        print(f"  [{label} basarisiz] {exc}\n    govde: {body}")
+        log(f"  [{label} basarisiz] {exc}\n    govde: {body}")
     else:
-        print(f"  [{label} basarisiz] {exc}")
+        log(f"  [{label} basarisiz] {exc}")
 
 
-def classify_with_ollama(prompt: str) -> str | None:
+def classify_with_ollama(prompt: str, log=print) -> str | None:
     try:
         resp = requests.post(
             f"{OLLAMA_URL}/api/chat",
@@ -368,13 +371,14 @@ def classify_with_ollama(prompt: str) -> str | None:
         data = resp.json()
         return data["message"]["content"]
     except (requests.RequestException, KeyError, ValueError) as exc:
-        _print_http_error("Ollama", exc)
+        _print_http_error("Ollama", exc, log=log)
         return None
 
 
-def classify_with_groq(prompt: str) -> str | None:
+def classify_with_groq(prompt: str, log=print) -> str | None:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
+        log("  [Groq atlandi] GROQ_API_KEY tanimli degil (.env / Streamlit secrets / GH Actions secrets)")
         return None
     try:
         resp = requests.post(
@@ -395,11 +399,11 @@ def classify_with_groq(prompt: str) -> str | None:
         data = resp.json()
         return data["choices"][0]["message"]["content"]
     except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
-        _print_http_error("Groq", exc)
+        _print_http_error("Groq", exc, log=log)
         return None
 
 
-def classify_with_anthropic(prompt: str) -> str | None:
+def classify_with_anthropic(prompt: str, log=print) -> str | None:
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         return None
@@ -416,23 +420,23 @@ def classify_with_anthropic(prompt: str) -> str | None:
         )
         return msg.content[0].text
     except Exception as exc:  # noqa: BLE001 - genis yakalama, sadece fallback icin
-        print(f"  [Anthropic basarisiz] {exc}")
+        log(f"  [Anthropic basarisiz] {exc}")
         return None
 
 
-def classify_tender(title: str, buyer: str) -> tuple[str | None, str]:
+def classify_tender(title: str, buyer: str, log=print) -> tuple[str | None, str]:
     """Donen: (kategori_veya_None, kaynak). Sirasiyla Ollama -> Groq -> Anthropic dener."""
     prompt = build_classify_prompt(title, buyer)
 
-    raw = classify_with_ollama(prompt)
+    raw = classify_with_ollama(prompt, log=log)
     if raw:
         return normalize_label(raw), "ollama"
 
-    raw = classify_with_groq(prompt)
+    raw = classify_with_groq(prompt, log=log)
     if raw:
         return normalize_label(raw), "groq"
 
-    raw = classify_with_anthropic(prompt)
+    raw = classify_with_anthropic(prompt, log=log)
     if raw:
         return normalize_label(raw), "anthropic"
 
@@ -575,7 +579,7 @@ def run_ingest(since: str | None = None, until: str | None = None, lookback_days
             for w in winners:
                 log(f"    - {w.get('name')} | {w.get('email', 'e-posta yok')} | {w.get('phone', 'tel yok')}")
 
-            category, category_source = classify_tender(title, buyer)
+            category, category_source = classify_tender(title, buyer, log=log)
             if category:
                 log(f"  Kategori ({category_source}): {category}")
             else:
