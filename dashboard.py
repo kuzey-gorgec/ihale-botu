@@ -470,15 +470,6 @@ with tab_yeni_tarama:
         "taramaya ek olarak - istediğin an elle tetikleyebileceğin bir tarama."
     )
 
-    with st.expander("ℹ️ Bölge filtresi hakkında bilinmesi gereken bir şey"):
-        st.markdown(
-            "TED'in arama alanı NUTS bölge koduna göre filtreleniyor (ör. Bayern → `DE2`). "
-            "Bu davranış TED'in kendi API'sine karşı canlı test edilemedi (bu ortamdan o "
-            "API'ye erişim yok). **Güvenmeden önce aşağıdaki '🔎 Sadece say' butonuyla "
-            "'Tüm Almanya' ile seçtiğin bölgenin eşleşme sayılarını karşılaştır** - bölge "
-            "sayısı belirgin şekilde küçükse filtre çalışıyor demektir; ikisi aynıysa bana haber ver."
-        )
-
     col_region, col_since, col_until = st.columns(3)
     with col_region:
         region_choice = st.selectbox("Bölge (Bundesland)", [TUM_ALMANYA] + BUNDESLAND_DISPLAY)
@@ -491,7 +482,7 @@ with tab_yeni_tarama:
 
     place_code = ted_ingest.resolve_place_code(None if region_choice == TUM_ALMANYA else region_choice)
 
-    if st.button("🔎 Sadece say (TED'e yazmadan test et)"):
+    if st.button("🔎 Sadece eşleşme sayısını göster"):
         _ensure_env_vars()
         try:
             total_all = ted_ingest.count_notices(str(since_date), str(until_date), "DEU")
