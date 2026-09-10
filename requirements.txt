@@ -1,0 +1,7 @@
+psycopg2-binary>=2.9
+python-dotenv>=1.0
+requests>=2.31
+streamlit>=1.38
+pandas>=2.2
+# anthropic>=0.40  # opsiyonel son-care fallback; Ollama/Groq icin gerekmiyor,
+#                  # istersen ac (pip install anthropic)

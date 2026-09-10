@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+n8n_log.txt
+ted_probe_raw.json
+*.log

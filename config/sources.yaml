@@ -1,0 +1,128 @@
+# Ihale/kaynak listesi - config-driven scraper framework icin taslak.
+# Her kaynak: type (aggregator | state_portal | award_registry | reference),
+# scope (ne kapsiyor), access (free/paid/api var mi), notes.
+#
+# Bu dosya "canli" bir dokuman: yeni bir eyalet/portal/Zweckverband
+# bulundukca buraya eklenecek. Amac hepsini elle tek tek yazmak degil,
+# oncelik sirasina gore en genis kapsayan kaynaklardan basliyoruz.
+
+fiber_aggregators:
+  - name: TendiGo Glasfaserausbau
+    url: https://tendigo.de/ausschreibungen/glasfaserausbau
+    type: aggregator
+    scope: "Almanya genelinde aktif glasfaser/breitband ihaleleri - ozel olarak fiber'a odakli"
+    access: "Ucretsiz arama/filtre; AI analiz ve otomatik alert ucretli"
+    notes: >
+      En iyi baslangic noktasi - zaten fiber'a filtrelenmis, awarding body,
+      lokasyon, deadline, tahmini hacim gosteriyor. ANCAK sadece acik ihaleleri
+      gosteriyor, kazananlari (sonuclanan ihale) GOSTERMIYOR - kazanan bilgisi
+      icin award_registries kaynaklarina bakmak gerekiyor.
+
+  - name: DTAD Tiefbau/Glasfaser
+    url: https://www.dtad.com/de/ausschreibungen/branchen/tiefbau
+    type: aggregator
+    scope: "Tiefbau/Erdarbeiten ihaleleri (glasfaser kazi isleri buraya da dusuyor)"
+    access: "Ucretli abonelik"
+    notes: "Kategori bazli filtre var, bolgeye gore de (orn. /hessen/tiefbau) filtrelenebiliyor"
+
+  - name: Vergabe24
+    url: https://www.vergabe24.de
+    type: aggregator
+    scope: "Genel kamu ihale arama motoru, Bayern kokenli ama Almanya genelini kapsiyor"
+    access: "Ucretli abonelik (bazi aramalar ucretsiz)"
+    notes: "Vergaberecht sozlugu de var, referans olarak da kullanilabilir"
+
+  - name: service.bund.de Ausschreibungen
+    url: https://www.service.bund.de/Content/DE/Ausschreibungen/Suche/Formular.html
+    type: aggregator
+    scope: "Bund/Land/Kommune genelinde resmi ihale arama - devlet tarafindan isletiliyor"
+    access: "Ucretsiz"
+    notes: "Resmi kaynak oldugu icin guvenilir, ama UI eski / arama filtreleri sinirli olabilir"
+
+award_registries:
+  - name: TED (Tenders Electronic Daily)
+    url: https://ted.europa.eu
+    type: award_registry
+    scope: "AB esik ustu ihaleler (buyuk capli projeler) - hem ilan hem SONUC/Zuschlag bilgisi zorunlu yayinlaniyor"
+    access: "Ucretsiz, resmi API mevcut (eForms/OpenData)"
+    notes: >
+      "Kim kazandi" sorusunun en guvenilir cevabi burada esik ustu projeler icin.
+      Kucuk capli yerel Zweckverband ihaleleri esigin altinda kalabilir, o zaman
+      bu kaynakta gorunmez.
+
+  - name: Bundesanzeiger Vergabebekanntmachungen
+    url: https://www.bundesanzeiger.de
+    type: award_registry
+    scope: "Esik alti ihalelerin bazilari + resmi bekanntmachung/Zuschlag ilanlari"
+    access: "Kismen ucretsiz arama"
+    notes: "Esik alti ihalelerde sonuc yayinlama zorunlulugu TED kadar net degil, kapsam degisken"
+
+state_portals:
+  # 16 eyaletin merkezi Vergabeplattform'lari. Cogu belediye/Zweckverband
+  # ihalesini de bu platformlar uzerinden yayinliyor (yerel portali olmayanlar icin).
+  - state: Nordrhein-Westfalen
+    name: Vergabemarktplatz NRW
+    url: https://vergabe.nrw.de
+  - state: Bayern
+    name: vergabe24.bayern
+    url: https://vergabe24.bayern
+  - state: Baden-Württemberg
+    name: Staatsanzeiger Baden-Württemberg
+    url: https://staatsanzeiger-bw.de
+  - state: Niedersachsen
+    name: Niedersächsische Vergabeplattform
+    url: https://vergabe.niedersachsen.de
+  - state: Hessen
+    name: Hessische Ausschreibungsdatenbank (HAD)
+    url: https://vergabe.hessen.de
+  - state: Rheinland-Pfalz
+    name: Vergabemarktplatz Rheinland-Pfalz
+    url: https://vergabe.rlp.de
+  - state: Sachsen
+    name: evergabe.sachsen.de
+    url: https://evergabe.sachsen.de
+  - state: Berlin
+    name: Vergabeplattform Berlin
+    url: https://vergabeplattform.berlin.de
+  - state: Schleswig-Holstein
+    name: Schleswig-Holstein Vergabeportal
+    url: https://vergabe.schleswig-holstein.de
+  - state: Brandenburg
+    name: Vergabemarktplatz Brandenburg
+    url: https://vergabemarktplatz.brandenburg.de
+  - state: Sachsen-Anhalt
+    name: Vergabemarktplatz Sachsen-Anhalt
+    url: https://vergabemarktplatz.sachsen-anhalt.de
+  - state: Thüringen
+    name: Vergabemarktplatz Thüringen
+    url: https://vergabemarktplatz.thueringen.de
+  - state: Hamburg
+    name: Hamburger Vergabeplattform
+    url: https://vergabe.hamburg.de
+  - state: Mecklenburg-Vorpommern
+    name: mv-vergabe.de
+    url: https://mv-vergabe.de
+  - state: Saarland
+    name: Vergabe Portal Saarland
+    url: https://vergabe.saarland
+  - state: Bremen
+    name: Vergabeportal Bremen
+    url: https://vergabe.bremen.de
+
+reference_only:
+  # Dogrudan ihale/tedarikci verisi yok ama baglam/dogrulama icin faydali.
+  - name: Gigabitförderung (Bund)
+    url: https://www.gigabitfoerderung.gov.de
+    notes: >
+      Sadece yonetmelik/cagri dokumanlari, kazanan/proje listesi yok.
+      Bir bolgenin "gigabit destekli" olup olmadigini teyit etmek icin
+      referans olarak kullanilabilir, scraping hedefi degil.
+  - name: Gigabit.NRW Ausschreibungen
+    url: https://www.gigabit.nrw.de/aktuelles/ausschreibungen.html
+    notes: "NRW'ye ozel breitband programi duyurulari - state_portals'a ek, NRW icin ikinci kaynak"
+
+# TODO: Zweckverband / Stadtwerke bazinda yuzlerce lokal site var, hepsini
+# elle listelemek pratik degil. Once TendiGo + state_portals ile ne kadar
+# kapsam yakaladigimizi olcup, bosluklari Google/News aramasiyla (site:
+# operator + "Zweckverband breitband Ausschreibung <bolge>") tamamlayan
+# bir "discovery" adimi ekleyecegiz - bu Faz 2'nin konusu.

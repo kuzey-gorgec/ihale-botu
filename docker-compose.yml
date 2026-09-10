@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:16
+    container_name: ihale-botu-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ihale
+      POSTGRES_PASSWORD: ihale_dev_pw
+      POSTGRES_DB: ihale_botu
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
