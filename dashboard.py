@@ -10,6 +10,8 @@ Kullanim:
 Varsayilan olarak http://localhost:8501 adresinde acilir.
 """
 import os
+import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -19,6 +21,12 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 load_dotenv(PROJECT_ROOT / ".env")
+
+# scripts/ted_ingest.py ve scripts/find_contacts.py'yi modul olarak import
+# edebilmek icin (dashboard'dan tarama tetikleyebilmek amaciyla).
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+import find_contacts  # noqa: E402
+import ted_ingest  # noqa: E402
 
 st.set_page_config(
     page_title="Almanya Fiber Ihale Botu",
@@ -131,6 +139,27 @@ def _get_database_url() -> str | None:
         return st.secrets.get("DATABASE_URL")
     except Exception:
         return None
+
+
+def _ensure_env_vars() -> None:
+    """ted_ingest.py / find_contacts.py kendi os.getenv() cagrilarini yapiyor -
+    yerelde .env'den zaten geliyor ama Streamlit Cloud'da .env yok, sadece
+    st.secrets var. Dashboard'dan tarama tetikleyebilmek icin bu degerleri
+    calisma anindan once os.environ'a da yaziyoruz (zaten ortamda varsa
+    dokunmuyoruz)."""
+    try:
+        secrets = st.secrets
+    except Exception:
+        return
+    for key in ("DATABASE_URL", "GROQ_API_KEY", "GROQ_MODEL", "SERPAPI_API_KEY",
+                "OLLAMA_URL", "OLLAMA_MODEL", "ANTHROPIC_API_KEY"):
+        if not os.getenv(key):
+            try:
+                value = secrets.get(key)
+            except Exception:
+                value = None
+            if value:
+                os.environ[key] = value
 
 
 def get_connection():
@@ -281,7 +310,9 @@ if only_with_winner:
 # ---------------------------------------------------------------------------
 # Sekmeler
 # ---------------------------------------------------------------------------
-tab_ihaleler, tab_kisiler = st.tabs(["📄 İhaleler", "👤 Kişiler"])
+tab_ihaleler, tab_kisiler, tab_yeni_tarama = st.tabs(
+    ["📄 İhaleler", "👤 Kişiler", "🔍 Yeni Tarama"]
+)
 
 with tab_ihaleler:
     col1, col2, col3, col4 = st.columns(4)
@@ -422,3 +453,124 @@ with tab_kisiler:
                     load_contacts.clear()
                     st.success(f"ID {int(to_delete)} silindi.")
                     st.rerun()
+
+BUNDESLAND_DISPLAY = [
+    "Baden-Württemberg", "Bayern", "Berlin", "Brandenburg", "Bremen",
+    "Hamburg", "Hessen", "Mecklenburg-Vorpommern", "Niedersachsen",
+    "Nordrhein-Westfalen", "Rheinland-Pfalz", "Saarland", "Sachsen",
+    "Sachsen-Anhalt", "Schleswig-Holstein", "Thüringen",
+]
+TUM_ALMANYA = "🇩🇪 Tüm Almanya"
+
+with tab_yeni_tarama:
+    st.subheader("🔍 Bölge / tarih bazlı yeni tarama")
+    st.caption(
+        "Burada seçtiğin bölge ve tarih aralığı için TED'den ihale çeker, sınıflandırır "
+        "ve istersen kazanan/ihale veren şirketler için kişi de arar. Bu, günlük otomatik "
+        "taramaya ek olarak - istediğin an elle tetikleyebileceğin bir tarama."
+    )
+
+    with st.expander("ℹ️ Bölge filtresi hakkında bilinmesi gereken bir şey"):
+        st.markdown(
+            "TED'in arama alanı NUTS bölge koduna göre filtreleniyor (ör. Bayern → `DE2`). "
+            "Bu davranış TED'in kendi API'sine karşı canlı test edilemedi (bu ortamdan o "
+            "API'ye erişim yok). **Güvenmeden önce aşağıdaki '🔎 Sadece say' butonuyla "
+            "'Tüm Almanya' ile seçtiğin bölgenin eşleşme sayılarını karşılaştır** - bölge "
+            "sayısı belirgin şekilde küçükse filtre çalışıyor demektir; ikisi aynıysa bana haber ver."
+        )
+
+    col_region, col_since, col_until = st.columns(3)
+    with col_region:
+        region_choice = st.selectbox("Bölge (Bundesland)", [TUM_ALMANYA] + BUNDESLAND_DISPLAY)
+    with col_since:
+        since_date = st.date_input("Başlangıç tarihi", value=date.today() - timedelta(days=60))
+    with col_until:
+        until_date = st.date_input("Bitiş tarihi", value=date.today())
+
+    tender_limit = st.slider("Kaç ihale işlensin (üst sınır)", min_value=5, max_value=300, value=50, step=5)
+
+    place_code = ted_ingest.resolve_place_code(None if region_choice == TUM_ALMANYA else region_choice)
+
+    if st.button("🔎 Sadece say (TED'e yazmadan test et)"):
+        _ensure_env_vars()
+        try:
+            total_all = ted_ingest.count_notices(str(since_date), str(until_date), "DEU")
+            total_region = (
+                total_all if region_choice == TUM_ALMANYA
+                else ted_ingest.count_notices(str(since_date), str(until_date), place_code)
+            )
+        except Exception as exc:
+            st.error(f"TED'e ulaşılamadı: {exc}")
+        else:
+            c1, c2 = st.columns(2)
+            c1.metric("Tüm Almanya'da eşleşme", total_all if total_all is not None else "—")
+            c2.metric(f"{region_choice}'de eşleşme", total_region if total_region is not None else "—")
+            if region_choice != TUM_ALMANYA and total_region == total_all and total_all:
+                st.warning(
+                    "Bölge sayısı Tüm Almanya ile birebir aynı çıktı - bölge filtresi bu "
+                    "seçim için etkisiz kalmış olabilir, bana haber ver."
+                )
+
+    st.divider()
+
+    do_contacts = st.checkbox("İhalelerden sonra kişi araması da yap", value=True)
+    if do_contacts:
+        contact_limit = st.number_input(
+            "Kişi araması için en fazla kaç şirket işlensin", min_value=1, max_value=100, value=20,
+        )
+        auto_website = st.checkbox(
+            "Şirket sitesinden e-posta/telefon da bul (fazladan SerpAPI sorgusu kullanır)",
+            value=True,
+            help="Kapalıysa sadece LinkedIn/Xing'den isim/pozisyon bulunur, e-posta/telefon hiç gelmez.",
+        )
+    else:
+        contact_limit, auto_website = 0, False
+
+    if st.button("🚀 Taramayı Başlat", type="primary"):
+        _ensure_env_vars()
+        logs: list[str] = []
+        ingest_summary = contacts_summary = None
+        with st.spinner("İhaleler TED'den çekiliyor, XML parse ediliyor ve sınıflandırılıyor..."):
+            try:
+                ingest_summary = ted_ingest.run_ingest(
+                    since=str(since_date), until=str(until_date), limit=int(tender_limit),
+                    place_code=place_code, dry_run=False, log=logs.append,
+                )
+            except RuntimeError as exc:
+                st.error(f"İhale taraması başarısız: {exc}")
+
+        if ingest_summary is not None and do_contacts:
+            with st.spinner("Kazanan/ihale veren şirketler için kişi aranıyor..."):
+                try:
+                    contacts_summary = find_contacts.run_find_contacts(
+                        limit=int(contact_limit), dry_run=False,
+                        auto_discover_website=auto_website, log=logs.append,
+                    )
+                except RuntimeError as exc:
+                    st.error(f"Kişi araması başarısız: {exc}")
+
+        st.session_state["last_scan_log"] = "\n".join(logs)
+        st.session_state["last_scan_summary"] = {
+            "ingest": ingest_summary, "contacts": contacts_summary,
+        }
+        load_tenders.clear()
+        load_winners.clear()
+        load_contacts.clear()
+        st.rerun()
+
+    if "last_scan_summary" in st.session_state:
+        summary = st.session_state["last_scan_summary"]
+        ingest_summary = summary.get("ingest")
+        contacts_summary = summary.get("contacts")
+        if ingest_summary:
+            st.success(
+                f"Son tarama: {ingest_summary['processed']} yeni ihale işlendi, "
+                f"{ingest_summary['skipped']} tanesi zaten DB'de vardı (atlandı)."
+            )
+        if contacts_summary:
+            st.success(
+                f"Kişi araması: {contacts_summary['companies_processed']} şirket işlendi, "
+                f"{contacts_summary['total_saved']} yeni kişi/iletişim kaydı bulundu."
+            )
+        with st.expander("İşlem günlüğü (son tarama)"):
+            st.code(st.session_state.get("last_scan_log", ""), language=None)

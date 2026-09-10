@@ -25,14 +25,28 @@ kontrol et.
 Kullanim:
     python scripts/ted_ingest.py --limit 50
     python scripts/ted_ingest.py --since 2024-01-01 --limit 20
+    python scripts/ted_ingest.py --region bayern --limit 20
 
   --since         bu tarihten sonraki sonuc ilanlarini al (YYYY-MM-DD).
                   Verilmezse bugunden --lookback-days kadar geriye gidilir -
                   boylece gunluk zamanlanmis calistirmada her seferinde
                   ayni sabit pencere degil, "son N gun" taranir.
+  --until         bu tarihe kadar olan ilanlari al (YYYY-MM-DD, opsiyonel).
   --lookback-days --since verilmezse kac gun geriye gidilsin (varsayilan: 60)
   --limit         kac ihale islensin (varsayilan: 100)
+  --region        belirli bir Bundesland ile sinirla (orn. "bayern",
+                   "nordrhein-westfalen") - verilmezse tum Almanya taranir.
+                   Gecerli isimler icin BUNDESLAND_NUTS1 sozlugune bak.
   --dry-run       DB'ye yazmadan sadece ne yapacagini yazdirir
+
+NOT (bolge filtresi): TED'in "place-of-performance" alani NUTS kod
+hiyerarsisini kullaniyor (CPV kodlarindaki gibi); ulke seviyesi icin "DEU"
+kullaniliyor, bolge (Bundesland) icin NUTS1 kodu (orn. Bayern -> DE2)
+deneniyor. Bu sandbox'tan TED API'sine canli erisim engellendigi icin bu
+davranis TED'in kendi API'sine karsi ELLE DOGRULANMADI - --dry-run ile
+"toplam X eslesme" sayisinin "Tum Almanya"ya kiyasla mantikli (daha kucuk)
+cikip cikmadigina bak; hic degismiyorsa filtre etkisiz demektir, bize haber
+ver.
 
 Zaten DB'de olan bir ihale (ted_publication_number ile eslesen) XML
 cekmeden/siniflandirmadan atlanir - gunluk calistirmada onceden islenmis
@@ -70,6 +84,40 @@ XML_NS = {
 
 FIBER_CPV_CODES = ["32562000", "32562300", "45232300", "45232310"]
 
+# Bundesland -> NUTS1 kodu (Eurostat/EU standardi, sabit siniflandirma).
+# place-of-performance filtresinde "DEU" yerine kullanilabilir.
+BUNDESLAND_NUTS1 = {
+    "baden-wurttemberg": "DE1",
+    "bayern": "DE2",
+    "berlin": "DE3",
+    "brandenburg": "DE4",
+    "bremen": "DE5",
+    "hamburg": "DE6",
+    "hessen": "DE7",
+    "mecklenburg-vorpommern": "DE8",
+    "niedersachsen": "DE9",
+    "nordrhein-westfalen": "DEA",
+    "rheinland-pfalz": "DEB",
+    "saarland": "DEC",
+    "sachsen": "DED",
+    "sachsen-anhalt": "DEE",
+    "schleswig-holstein": "DEF",
+    "thuringen": "DEG",
+}
+
+
+def resolve_place_code(region: str | None) -> str:
+    """Bundesland adini (turkce klavyeden gelebilecek varyasyonlarla) NUTS1
+    koduna cevirir; taninmayan/bos deger icin tum Almanya (DEU) doner."""
+    if not region:
+        return "DEU"
+    key = (
+        region.strip().lower()
+        .replace("ü", "u").replace("ö", "o").replace("ä", "a")
+        .replace(" ", "-")
+    )
+    return BUNDESLAND_NUTS1.get(key, "DEU")
+
 CATEGORIES = [
     "tiefbau_kazi",
     "netzbetrieb_konzesyon",
@@ -89,18 +137,22 @@ CLASSIFY_MODEL = "claude-haiku-4-5-20251001"
 # 1) TED arama
 # ---------------------------------------------------------------------------
 
-def build_query(since_date: str) -> str:
+def build_query(since_date: str, until_date: str | None = None, place_code: str = "DEU") -> str:
     cpv_clause = " OR ".join(f"classification-cpv={c}*" for c in FIBER_CPV_CODES)
     since_fmt = since_date.replace("-", "")
-    return (
-        f"({cpv_clause}) AND place-of-performance=DEU "
+    query = (
+        f"({cpv_clause}) AND place-of-performance={place_code} "
         f"AND notice-type=can-standard AND publication-date>={since_fmt}"
     )
+    if until_date:
+        query += f" AND publication-date<={until_date.replace('-', '')}"
+    return query
 
 
-def search_notices(since_date: str, limit: int) -> list[dict]:
+def search_notices(since_date: str, limit: int, until_date: str | None = None,
+                    place_code: str = "DEU", log=print) -> list[dict]:
     body = {
-        "query": build_query(since_date),
+        "query": build_query(since_date, until_date, place_code),
         "fields": [
             "publication-number", "notice-title", "buyer-name",
             "publication-date", "total-value",
@@ -114,8 +166,24 @@ def search_notices(since_date: str, limit: int) -> list[dict]:
     data = resp.json()
     total = data.get("totalNoticeCount")
     notices = data.get("notices", [])
-    print(f"[TED arama] toplam {total} eslesme, bu calistirmada {len(notices)} tanesi islenecek")
+    log(f"[TED arama] toplam {total} eslesme, bu calistirmada {len(notices)} tanesi islenecek")
     return notices
+
+
+def count_notices(since_date: str, until_date: str | None = None, place_code: str = "DEU") -> int | None:
+    """Hicbir sey islemeden/yazmadan sadece toplam eslesme sayisini doner -
+    bolge filtresinin gercekten calisip calismadigini ucuza kontrol etmek
+    icin (bkz. dosyanin ustundeki NOT)."""
+    body = {
+        "query": build_query(since_date, until_date, place_code),
+        "fields": ["publication-number"],
+        "page": 1,
+        "limit": 1,
+        "scope": "ALL",
+    }
+    resp = requests.post(TED_SEARCH_URL, json=body, timeout=30)
+    resp.raise_for_status()
+    return resp.json().get("totalNoticeCount")
 
 
 def notice_title_de(notice: dict) -> str:
@@ -378,7 +446,7 @@ def classify_tender(title: str, buyer: str) -> tuple[str | None, str]:
 def get_connection():
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
-        sys.exit("HATA: DATABASE_URL tanimli degil (.env dosyasina bak)")
+        raise RuntimeError("DATABASE_URL tanimli degil (.env dosyasina veya Streamlit secrets'a bak)")
     return psycopg2.connect(database_url)
 
 
@@ -460,90 +528,116 @@ def save_training_label(cur, tender_id: int, text_snapshot: str, label: str, lab
 # Ana akis
 # ---------------------------------------------------------------------------
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--since", default=None,
-                         help="YYYY-MM-DD, bu tarihten sonrasi (varsayilan: bugunden --lookback-days kadar geri)")
-    parser.add_argument("--lookback-days", type=int, default=60,
-                         help="--since verilmezse kac gun geriye gidilsin (varsayilan: 60)")
-    parser.add_argument("--limit", type=int, default=100, help="kac ihale islensin")
-    parser.add_argument("--dry-run", action="store_true", help="DB'ye yazmadan sadece goster")
-    args = parser.parse_args()
-
-    since = args.since or (date.today() - timedelta(days=args.lookback_days)).strftime("%Y-%m-%d")
-    notices = search_notices(since, args.limit)
+def run_ingest(since: str | None = None, until: str | None = None, lookback_days: int = 60,
+               limit: int = 100, place_code: str = "DEU", dry_run: bool = False,
+               log=print) -> dict:
+    """Tum ingest akisini calistirir. CLI (main()) ve dashboard.py'nin
+    "Yeni Tarama" ekrani tarafindan ortak kullanilir. `log` ile cagiran taraf
+    ciktiyi kendi istedigi yere yonlendirebilir (dashboard'da bir liste'ye
+    biriktirmek gibi) - varsayilan olarak normal print() davranisini korur."""
+    since = since or (date.today() - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    notices = search_notices(since, limit, until_date=until, place_code=place_code, log=log)
+    summary = {"since": since, "until": until, "place_code": place_code,
+               "total_matches": None, "processed": 0, "skipped": 0}
     if not notices:
-        print("Eslesen ihale yok.")
-        return
+        log("Eslesen ihale yok.")
+        return summary
 
-    conn = None if args.dry_run else get_connection()
+    conn = None if dry_run else get_connection()
     cur = conn.cursor() if conn else None
 
     processed = 0
     skipped = 0
-    for notice in notices:
-        pub = notice["publication-number"]
-        title = notice_title_de(notice)
-        buyer = notice_buyer(notice)
-        print(f"\n--- {pub} | {title} | Alici: {buyer}")
+    try:
+        for notice in notices:
+            pub = notice["publication-number"]
+            title = notice_title_de(notice)
+            buyer = notice_buyer(notice)
+            log(f"\n--- {pub} | {title} | Alici: {buyer}")
 
-        if cur is not None and tender_exists(cur, pub):
-            print("  Zaten DB'de var, atlaniyor.")
-            skipped += 1
-            continue
+            if cur is not None and tender_exists(cur, pub):
+                log("  Zaten DB'de var, atlaniyor.")
+                skipped += 1
+                continue
 
-        try:
-            xml_text = fetch_notice_xml(pub)
-        except requests.RequestException as exc:
-            print(f"  [HATA] xml cekilemedi: {exc}")
-            continue
+            try:
+                xml_text = fetch_notice_xml(pub)
+            except requests.RequestException as exc:
+                log(f"  [HATA] xml cekilemedi: {exc}")
+                continue
 
-        try:
-            winners = parse_winners(xml_text)
-        except ET.ParseError as exc:
-            print(f"  [HATA] xml parse edilemedi: {exc}")
-            winners = []
-        print(f"  Bulunan kazanan sayisi: {len(winners)}")
-        for w in winners:
-            print(f"    - {w.get('name')} | {w.get('email', 'e-posta yok')} | {w.get('phone', 'tel yok')}")
+            try:
+                winners = parse_winners(xml_text)
+            except ET.ParseError as exc:
+                log(f"  [HATA] xml parse edilemedi: {exc}")
+                winners = []
+            log(f"  Bulunan kazanan sayisi: {len(winners)}")
+            for w in winners:
+                log(f"    - {w.get('name')} | {w.get('email', 'e-posta yok')} | {w.get('phone', 'tel yok')}")
 
-        category, category_source = classify_tender(title, buyer)
-        if category:
-            print(f"  Kategori ({category_source}): {category}")
-        else:
-            print("  Kategori: atlandi (hicbir saglayici erisilebilir degil)")
+            category, category_source = classify_tender(title, buyer)
+            if category:
+                log(f"  Kategori ({category_source}): {category}")
+            else:
+                log("  Kategori: atlandi (hicbir saglayici erisilebilir degil)")
 
-        if args.dry_run:
+            if dry_run:
+                processed += 1
+                time.sleep(0.3)
+                continue
+
+            buyer_company_id = upsert_company(cur, buyer) if buyer else None
+            tender_id, is_new = upsert_tender(cur, notice, category, category_source)
+
+            if buyer_company_id:
+                link_company_role(cur, tender_id, buyer_company_id, "issuer")
+
+            for w in winners:
+                winner_id = upsert_company(
+                    cur, w["name"],
+                    email=w.get("email"), phone=w.get("phone"),
+                    address=w.get("address"), nuts=w.get("nuts"),
+                )
+                link_company_role(cur, tender_id, winner_id, "winner")
+
+            if category:
+                save_training_label(cur, tender_id, f"{title} | {buyer}", category, category_source)
+
+            conn.commit()
             processed += 1
-            time.sleep(0.3)
-            continue
+            time.sleep(0.5)  # TED sunucusuna nazik davranalim
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
 
-        buyer_company_id = upsert_company(cur, buyer) if buyer else None
-        tender_id, is_new = upsert_tender(cur, notice, category, category_source)
+    log(f"\nToplam islenen ihale: {processed} (atlanan/zaten vardi: {skipped})")
+    summary["processed"] = processed
+    summary["skipped"] = skipped
+    return summary
 
-        if buyer_company_id:
-            link_company_role(cur, tender_id, buyer_company_id, "issuer")
 
-        for w in winners:
-            winner_id = upsert_company(
-                cur, w["name"],
-                email=w.get("email"), phone=w.get("phone"),
-                address=w.get("address"), nuts=w.get("nuts"),
-            )
-            link_company_role(cur, tender_id, winner_id, "winner")
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--since", default=None,
+                         help="YYYY-MM-DD, bu tarihten sonrasi (varsayilan: bugunden --lookback-days kadar geri)")
+    parser.add_argument("--until", default=None, help="YYYY-MM-DD, bu tarihe kadar (opsiyonel)")
+    parser.add_argument("--lookback-days", type=int, default=60,
+                         help="--since verilmezse kac gun geriye gidilsin (varsayilan: 60)")
+    parser.add_argument("--limit", type=int, default=100, help="kac ihale islensin")
+    parser.add_argument("--region", default=None,
+                         help="Bundesland adi (orn. bayern, nordrhein-westfalen) - verilmezse tum Almanya")
+    parser.add_argument("--dry-run", action="store_true", help="DB'ye yazmadan sadece goster")
+    args = parser.parse_args()
 
-        if category:
-            save_training_label(cur, tender_id, f"{title} | {buyer}", category, category_source)
-
-        conn.commit()
-        processed += 1
-        time.sleep(0.5)  # TED sunucusuna nazik davranalim
-
-    if conn:
-        cur.close()
-        conn.close()
-
-    print(f"\nToplam islenen ihale: {processed} (atlanan/zaten vardi: {skipped})")
+    place_code = resolve_place_code(args.region)
+    try:
+        run_ingest(
+            since=args.since, until=args.until, lookback_days=args.lookback_days,
+            limit=args.limit, place_code=place_code, dry_run=args.dry_run,
+        )
+    except RuntimeError as exc:
+        sys.exit(f"HATA: {exc}")
 
 
 if __name__ == "__main__":

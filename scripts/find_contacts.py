@@ -20,9 +20,20 @@ Kurulum (ucretsiz):
 
 Kullanim:
   python scripts/find_contacts.py --limit 10                     # kontrolsuz sirketlerden 10 tane isle
+  python scripts/find_contacts.py --limit 10 --auto-website       # + her sirket icin resmi site keşfet
   python scripts/find_contacts.py --company-id 5                 # tek bir sirket, sadece rol bazli arama
   python scripts/find_contacts.py --company-id 5 --website https://firma.de   # + genel iletisim de dene
   python scripts/find_contacts.py --dry-run --limit 3            # DB'ye yazmadan sadece goster
+
+  --auto-website  toplu modda (--company-id verilmeden) her sirket icin
+                  once resmi web sitesini SerpAPI genel aramasiyla (site:
+                  kisitlamasi OLMADAN) bulmayi dener, sonra oradan
+                  eposta/telefon cikarir. Kisi basina isim/pozisyon disinda
+                  hicbir zaman eposta/telefon donmemesi sikayeti bunun
+                  icin var - normal rol aramasi (linkedin/xing) hicbir
+                  zaman profil sayfasini cekmiyor, sadece bu bayrak
+                  eposta/telefon getirebilir. Sirket basina +1 SerpAPI
+                  sorgusu harcar (250/ay ucretsiz kotayi daha hizli tuketir).
 """
 import argparse
 import os
@@ -39,7 +50,6 @@ from dotenv import load_dotenv
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
-SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY", "")
 SERPAPI_URL = "https://serpapi.com/search.json"
 
 HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ihale-botu-contact-finder/1.0)"}
@@ -52,11 +62,15 @@ PHONE_RE = re.compile(r"(\+49[\s/\-]?\(?0?\)?[\d][\d\s/\-]{7,}\d)|(\b0\d{2,5}[\s
 
 
 def serp_search(query: str, num: int = 5) -> list[dict]:
-    """SerpAPI uzerinden gercek Google arama sonucu doner (title/link/snippet)."""
-    if not SERPAPI_API_KEY:
+    """SerpAPI uzerinden gercek Google arama sonucu doner (title/link/snippet).
+    API anahtari her cagrida taze okunuyor (modul-seviyesi sabit degil) -
+    boylece dashboard.py gibi calisma anindan sonra os.environ'a yazan bir
+    cagiran da dogru anahtari kullanabiliyor."""
+    api_key = os.getenv("SERPAPI_API_KEY", "")
+    if not api_key:
         return []
     params = {
-        "q": query, "api_key": SERPAPI_API_KEY, "engine": "google",
+        "q": query, "api_key": api_key, "engine": "google",
         "num": num, "hl": "de", "gl": "de",
     }
     try:
@@ -95,6 +109,43 @@ def extract_contact_from_page(url: str) -> dict:
                 "source_url": page_url,
             }
     return {}
+
+
+# site: kisitlamasi olmadan genel arama yapinca Google'in genelde dondugu,
+# sirketin KENDI sitesi olmayan yaygin alan adlari - resmi site keşfinde elenir.
+NON_OFFICIAL_DOMAINS = {
+    "linkedin.com", "xing.com", "facebook.com", "instagram.com", "twitter.com",
+    "x.com", "youtube.com", "wikipedia.org", "northdata.de", "northdata.com",
+    "bundesanzeiger.de", "handelsregister.de", "unternehmensregister.de",
+    "kununu.com", "indeed.com", "glassdoor.com", "glassdoor.de",
+    "dastelefonbuch.de", "gelbeseiten.de", "wlw.de", "europages.de",
+    "europages.com", "opencorporates.com", "google.com", "bing.com",
+    "firmenwissen.de", "creditreform.de", "dnb.com", "yelp.de", "yelp.com",
+}
+
+
+def _looks_like_official_site(url: str) -> bool:
+    if not url:
+        return False
+    netloc = urlparse(url).netloc.lower().removeprefix("www.")
+    if "." not in netloc:
+        return False
+    # tam eslesme yetmiyor: Google cogu zaman "de.linkedin.com",
+    # "en.wikipedia.org" gibi ulke/dil alt-alan adlari donuyor - bunlari da
+    # yakalamak icin subdomain'leri de kontrol ediyoruz.
+    return not any(netloc == blocked or netloc.endswith(f".{blocked}") for blocked in NON_OFFICIAL_DOMAINS)
+
+
+def discover_official_website(company_name: str) -> str | None:
+    """Sirketin resmi sitesini site: kisitlamasi OLMADAN genel bir Google
+    aramasiyla (SerpAPI uzerinden) bulmaya calisir - ilk 'resmi site gibi
+    gorunen' sonucu doner, bulamazsa None."""
+    for item in serp_search(f'"{company_name}" impressum OR kontakt', num=5):
+        link = item.get("link", "")
+        if _looks_like_official_site(link):
+            parsed = urlparse(link)
+            return f"{parsed.scheme}://{parsed.netloc}"
+    return None
 
 
 NAME_SEPARATOR_RE = re.compile(r"\s[-–|]\s")
@@ -182,27 +233,36 @@ def link_contact_to_company_tenders(cur, contact_id: int, company_id: int) -> No
 
 
 def process_company(cur, company_id: int, company_name: str, dry_run: bool,
-                     website: str | None = None) -> int:
-    print(f"\n--- {company_name} (id={company_id})")
+                     website: str | None = None, auto_discover_website: bool = False,
+                     log=print) -> int:
+    log(f"\n--- {company_name} (id={company_id})")
     saved = 0
+
+    if not website and auto_discover_website:
+        website = discover_official_website(company_name)
+        if website:
+            log(f"  Resmi site bulundu: {website}")
+        else:
+            log("  Resmi site bulunamadi (genel arama sonucsuz ya da hep bilinen 3.parti siteler).")
+        time.sleep(1)
 
     if website:
         general = extract_contact_from_page(website)
         if general:
-            print(f"  Genel iletisim ({website}): {general.get('email')} / {general.get('phone')}")
+            log(f"  Genel iletisim ({website}): {general.get('email')} / {general.get('phone')}")
             if not dry_run:
                 cid = save_contact(cur, company_id, None, None, general.get("email"),
                                     general.get("phone"), "website")
                 link_contact_to_company_tenders(cur, cid, company_id)
                 saved += 1
         else:
-            print(f"  Verilen sitede ({website}) eposta/telefon bulunamadi.")
+            log(f"  Verilen sitede ({website}) eposta/telefon bulunamadi.")
 
     role_contacts = find_role_contacts(company_name)
     if not role_contacts:
-        print("  LinkedIn/Xing'de role uyan sonuc bulunamadi.")
+        log("  LinkedIn/Xing'de role uyan sonuc bulunamadi.")
     for rc in role_contacts:
-        print(f"  [{rc['source']}] {rc['full_name']} - {rc['url']}")
+        log(f"  [{rc['source']}] {rc['full_name']} - {rc['url']}")
         if not dry_run:
             cid = save_contact(cur, company_id, rc["full_name"], rc["title"], None, None, rc["source"])
             link_contact_to_company_tenders(cur, cid, company_id)
@@ -211,50 +271,72 @@ def process_company(cur, company_id: int, company_name: str, dry_run: bool,
     return saved
 
 
+def run_find_contacts(limit: int = 10, company_id: int | None = None, website: str | None = None,
+                       dry_run: bool = False, auto_discover_website: bool = False, log=print) -> dict:
+    """Tum kisi-bulma akisini calistirir. CLI (main()) ve dashboard.py'nin
+    "Yeni Tarama" ekrani tarafindan ortak kullanilir."""
+    if website and not company_id:
+        raise RuntimeError("--website sadece --company-id ile birlikte kullanilabilir.")
+
+    if not os.getenv("SERPAPI_API_KEY"):
+        raise RuntimeError(
+            "SERPAPI_API_KEY tanimli degil. Bu dosyanin ustundeki docstring'de ucretsiz "
+            "kurulum adimlari var - .env dosyana (ya da Streamlit secrets'a) ekleyip tekrar dene."
+        )
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL tanimli degil (.env dosyasina ya da Streamlit secrets'a bak)")
+
+    conn = psycopg2.connect(database_url)
+    cur = conn.cursor()
+
+    try:
+        if company_id:
+            row = get_company_by_id(cur, company_id)
+            companies = [row] if row else []
+        else:
+            companies = get_companies_needing_contacts(cur, limit)
+
+        if not companies:
+            log("Islenecek sirket yok (hepsi zaten kontrol edilmis ya da id bulunamadi).")
+            return {"companies_processed": 0, "total_saved": 0}
+
+        total_saved = 0
+        for cid, company_name in companies:
+            total_saved += process_company(
+                cur, cid, company_name, dry_run, website,
+                auto_discover_website=auto_discover_website, log=log,
+            )
+            if not dry_run:
+                conn.commit()
+            time.sleep(1)
+
+        log(f"\nToplam kaydedilen iletisim: {total_saved} (hepsi verified=false, dashboard'dan onay bekliyor)")
+        return {"companies_processed": len(companies), "total_saved": total_saved}
+    finally:
+        cur.close()
+        conn.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=10, help="kac sirket islensin (varsayilan: 10)")
     parser.add_argument("--company-id", type=int, default=None, help="sadece bu sirket id'sini isle")
     parser.add_argument("--website", default=None,
                          help="--company-id ile birlikte: sirketin resmi sitesi, genel iletisim icin denenir")
+    parser.add_argument("--auto-website", action="store_true",
+                         help="toplu modda her sirket icin resmi siteyi otomatik kesfetmeyi dener")
     parser.add_argument("--dry-run", action="store_true", help="DB'ye yazmadan sadece goster")
     args = parser.parse_args()
 
-    if args.website and not args.company_id:
-        sys.exit("HATA: --website sadece --company-id ile birlikte kullanilabilir.")
-
-    if not SERPAPI_API_KEY:
-        sys.exit(
-            "HATA: SERPAPI_API_KEY tanimli degil.\n"
-            "Bu dosyanin ustundeki docstring'de ucretsiz kurulum adimlari var - "
-            ".env dosyana ekleyip tekrar dene."
+    try:
+        run_find_contacts(
+            limit=args.limit, company_id=args.company_id, website=args.website,
+            dry_run=args.dry_run, auto_discover_website=args.auto_website,
         )
-
-    conn = psycopg2.connect(os.getenv("DATABASE_URL"))
-    cur = conn.cursor()
-
-    if args.company_id:
-        row = get_company_by_id(cur, args.company_id)
-        companies = [row] if row else []
-    else:
-        companies = get_companies_needing_contacts(cur, args.limit)
-
-    if not companies:
-        print("Islenecek sirket yok (hepsi zaten kontrol edilmis ya da id bulunamadi).")
-        cur.close()
-        conn.close()
-        return
-
-    total_saved = 0
-    for company_id, company_name in companies:
-        total_saved += process_company(cur, company_id, company_name, args.dry_run, args.website)
-        if not args.dry_run:
-            conn.commit()
-        time.sleep(1)
-
-    cur.close()
-    conn.close()
-    print(f"\nToplam kaydedilen iletisim: {total_saved} (hepsi verified=false, dashboard'dan onay bekliyor)")
+    except RuntimeError as exc:
+        sys.exit(f"HATA: {exc}")
 
 
 if __name__ == "__main__":
