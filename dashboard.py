@@ -26,6 +26,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 # edebilmek icin (dashboard'dan tarama tetikleyebilmek amaciyla).
 sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
 import find_contacts  # noqa: E402
+import generate_drafts  # noqa: E402
 import ted_ingest  # noqa: E402
 
 st.set_page_config(
@@ -323,6 +324,93 @@ def update_company(company_id: int, email: str | None, phone: str | None,
         conn.close()
 
 
+@st.cache_data(ttl=60)
+def load_sender_profile() -> dict:
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT company_name, services_de, contact_name, phone, email FROM sender_profile WHERE id = 1"
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    keys = ["company_name", "services_de", "contact_name", "phone", "email"]
+    if not row:
+        return {k: "" for k in keys}
+    return {k: ("" if _is_empty(v) else v) for k, v in zip(keys, row)}
+
+
+def save_sender_profile(company_name: str, services_de: str, contact_name: str,
+                         phone: str, email: str) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO sender_profile (id, company_name, services_de, contact_name, phone, email, updated_at)
+                    VALUES (1, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (id) DO UPDATE SET
+                        company_name = EXCLUDED.company_name,
+                        services_de = EXCLUDED.services_de,
+                        contact_name = EXCLUDED.contact_name,
+                        phone = EXCLUDED.phone,
+                        email = EXCLUDED.email,
+                        updated_at = now()
+                    """,
+                    (company_name or None, services_de or None, contact_name or None,
+                     phone or None, email or None),
+                )
+    finally:
+        conn.close()
+
+
+@st.cache_data(ttl=60)
+def load_drafts() -> pd.DataFrame:
+    query = """
+        SELECT
+            ed.id, ed.tender_id, ed.contact_id, ed.draft_text, ed.category_used,
+            ed.status, ed.created_at,
+            t.title AS tender_title,
+            ct.full_name AS contact_name, ct.email AS contact_email,
+            (
+                SELECT c.name FROM tender_companies tc
+                JOIN companies c ON c.id = tc.company_id
+                WHERE tc.tender_id = ed.tender_id AND tc.role = 'winner'
+                LIMIT 1
+            ) AS company_name
+        FROM email_drafts ed
+        JOIN tenders t ON t.id = ed.tender_id
+        LEFT JOIN contacts ct ON ct.id = ed.contact_id
+        ORDER BY ed.created_at DESC, ed.id DESC
+    """
+    return _run_query(query)
+
+
+def update_draft(draft_id: int, draft_text: str, status: str) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE email_drafts SET draft_text = %s, status = %s WHERE id = %s",
+                    (draft_text, status, draft_id),
+                )
+    finally:
+        conn.close()
+
+
+def delete_draft(draft_id: int) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM email_drafts WHERE id = %s", (draft_id,))
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Baslik
 # ---------------------------------------------------------------------------
@@ -369,8 +457,8 @@ if only_with_winner:
 # ---------------------------------------------------------------------------
 # Sekmeler
 # ---------------------------------------------------------------------------
-tab_ihaleler, tab_kisiler, tab_yeni_tarama = st.tabs(
-    ["📄 İhaleler", "👤 Kişiler", "🔍 Yeni Tarama"]
+tab_ihaleler, tab_kisiler, tab_mail_taslaklari, tab_yeni_tarama = st.tabs(
+    ["📄 İhaleler", "👤 Kişiler", "✉️ Mail Taslakları", "🔍 Yeni Tarama"]
 )
 
 with tab_ihaleler:
@@ -594,6 +682,123 @@ with tab_kisiler:
                         st.rerun()
                     else:
                         st.info("Silmek için en az bir kişinin 'Sil' kutusunu işaretle.")
+
+DRAFT_STATUS_LABELS = {
+    "draft": "📝 Taslak",
+    "reviewed": "👀 Gözden geçirildi",
+    "sent": "✅ Gönderildi",
+}
+
+with tab_mail_taslaklari:
+    st.subheader("✉️ Mail Taslakları")
+    st.caption(
+        "İhaleyi kazanan şirketlere gönderebileceğin, taşeronluk/iş birliği teklifi içeren "
+        "e-posta taslaklarını (Almanca + Türkçe özet) LLM ile üretir. **Hiçbir e-posta otomatik "
+        "gönderilmez** - burada gözden geçirip, gerekirse düzenleyip kendi mail programından sen gönderirsin."
+    )
+
+    sender = load_sender_profile()
+    with st.expander(
+        "🏢 Gönderen firma bilgileri (taslaklarda imza / teklif metni için kullanılır)",
+        expanded=not sender["company_name"],
+    ):
+        with st.form("sender_profile_form"):
+            sp_c1, sp_c2 = st.columns(2)
+            sp_company = sp_c1.text_input("Firma adı", value=sender["company_name"])
+            sp_contact = sp_c2.text_input("İletişim kişisi", value=sender["contact_name"])
+            sp_c3, sp_c4 = st.columns(2)
+            sp_phone = sp_c3.text_input("Telefon", value=sender["phone"])
+            sp_email = sp_c4.text_input("E-posta", value=sender["email"])
+            sp_services = st.text_area(
+                "Sunduğun hizmet (Almanca, kısa açıklama - taslak metninde doğrudan kullanılır)",
+                value=sender["services_de"],
+                placeholder="z.B. Tiefbau-, Kabelverlegungs- und Montagearbeiten im Glasfaserausbau",
+            )
+            if st.form_submit_button("💾 Kaydet"):
+                save_sender_profile(sp_company, sp_services, sp_contact, sp_phone, sp_email)
+                load_sender_profile.clear()
+                st.success("Gönderen firma bilgileri kaydedildi.")
+                st.rerun()
+
+    st.divider()
+
+    sender_ready = bool(sender["company_name"] and sender["services_de"])
+    if not sender_ready:
+        st.info("Taslak üretmeden önce yukarıdan en azından firma adı ve sunduğun hizmeti doldurup kaydet.")
+
+    draft_limit = st.number_input(
+        "Kaç ihale için taslak üretilsin (üst sınır)", min_value=1, max_value=50, value=10,
+    )
+    if st.button("✨ Yeni taslak üret", type="primary", disabled=not sender_ready):
+        _ensure_env_vars()
+        logs: list[str] = []
+        result = None
+        with st.spinner("Taslaklar üretiliyor (LLM çağrısı yapılıyor, biraz sürebilir)..."):
+            try:
+                result = generate_drafts.run_generate_drafts(
+                    limit=int(draft_limit), dry_run=False, log=logs.append,
+                )
+            except RuntimeError as exc:
+                st.error(f"Taslak üretimi başarısız: {exc}")
+        st.session_state["last_draft_log"] = "\n".join(logs)
+        if result is not None:
+            st.session_state["last_draft_summary"] = result
+            load_drafts.clear()
+        st.rerun()
+
+    if "last_draft_summary" in st.session_state:
+        st.success(f"Son üretim: {st.session_state['last_draft_summary']['generated']} yeni taslak oluşturuldu.")
+    if "last_draft_log" in st.session_state:
+        with st.expander("İşlem günlüğü (son taslak üretimi)"):
+            st.code(st.session_state.get("last_draft_log", ""), language=None)
+
+    st.divider()
+    st.subheader("📋 Mevcut taslaklar")
+    drafts = load_drafts()
+    if drafts.empty:
+        st.info("Henüz üretilmiş taslak yok. Yukarıdan üretebilirsin.")
+    else:
+        status_filter = st.multiselect(
+            "Durum filtrele",
+            options=list(DRAFT_STATUS_LABELS.keys()),
+            default=list(DRAFT_STATUS_LABELS.keys()),
+            format_func=lambda s: DRAFT_STATUS_LABELS.get(s, s),
+        )
+        shown = drafts[drafts["status"].isin(status_filter)]
+        st.caption(f"{len(shown)} taslak gösteriliyor.")
+        for _, drow in shown.iterrows():
+            de_text, tr_text = generate_drafts.parse_draft_text(drow["draft_text"] or "")
+            header = drow["tender_title"]
+            if not _is_empty(drow["company_name"]):
+                header = f"{header} → {drow['company_name']}"
+            with st.expander(f"{DRAFT_STATUS_LABELS.get(drow['status'], drow['status'])} · {header}"):
+                contact_display = drow["contact_name"] if not _is_empty(drow["contact_name"]) else "atanmadı (onaylı kişi bulunamadı)"
+                contact_email_display = drow["contact_email"] if not _is_empty(drow["contact_email"]) else "—"
+                st.caption(
+                    f"Kategori: {category_label(drow['category_used'])} · "
+                    f"Kişi: {contact_display} ({contact_email_display})"
+                )
+                new_de = st.text_area("Almanca e-posta", value=de_text, height=220, key=f"de_{drow['id']}")
+                new_tr = st.text_area("Türkçe özet", value=tr_text, height=100, key=f"tr_{drow['id']}")
+                dcol1, dcol2, dcol3 = st.columns([2, 1, 1])
+                status_keys = list(DRAFT_STATUS_LABELS.keys())
+                new_status = dcol1.selectbox(
+                    "Durum", status_keys,
+                    index=status_keys.index(drow["status"]) if drow["status"] in status_keys else 0,
+                    format_func=lambda s: DRAFT_STATUS_LABELS.get(s, s),
+                    key=f"status_draft_{drow['id']}",
+                )
+                if dcol2.button("💾 Kaydet", key=f"save_draft_{drow['id']}", width="stretch"):
+                    combined = generate_drafts.combine_draft_text(new_de, new_tr)
+                    update_draft(int(drow["id"]), combined, new_status)
+                    load_drafts.clear()
+                    st.success("Taslak güncellendi.")
+                    st.rerun()
+                if dcol3.button("🗑️ Sil", key=f"del_draft_{drow['id']}", width="stretch"):
+                    delete_draft(int(drow["id"]))
+                    load_drafts.clear()
+                    st.success("Taslak silindi.")
+                    st.rerun()
 
 BUNDESLAND_DISPLAY = [
     "Baden-Württemberg", "Bayern", "Berlin", "Brandenburg", "Bremen",

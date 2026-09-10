@@ -88,3 +88,17 @@ CREATE TABLE IF NOT EXISTS classification_training_data (
     labeled_by TEXT,               -- 'human' | 'llm'
     created_at TIMESTAMP DEFAULT now()
 );
+
+-- Mail taslağı üretiminde kullanılan gönderen (kendi) firma bilgisi - tek satır
+-- (id her zaman 1). Dashboard'daki "Mail Taslakları" sekmesinden düzenlenir,
+-- .env/secrets'a ihtiyaç duymadan DB'de saklanır.
+CREATE TABLE IF NOT EXISTS sender_profile (
+    id INT PRIMARY KEY DEFAULT 1,
+    company_name TEXT,
+    services_de TEXT,              -- sundugun hizmetin Almanca kisa tanimi (prompt'ta kullanilir)
+    contact_name TEXT,
+    phone TEXT,
+    email TEXT,
+    updated_at TIMESTAMP DEFAULT now(),
+    CHECK (id = 1)
+);
