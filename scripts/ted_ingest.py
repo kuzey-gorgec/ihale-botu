@@ -318,15 +318,22 @@ def classify_with_groq(prompt: str) -> str | None:
                 # gpt-oss modelleri "reasoning" modeli - cevabi vermeden once
                 # ic diyalog icin token harciyor, dusuk max_tokens bu asamada
                 # kesilip bos content donmesine sebep oluyordu.
-                "max_tokens": 300,
+                "max_tokens": 800,
                 "temperature": 0,
             },
             timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
-        content = data["choices"][0]["message"]["content"]
-        print(f"  [debug] Groq yaniti uzunlugu: {len(content) if content else 0}, icerik: {content!r}")
+        choice = data["choices"][0]
+        message = choice["message"]
+        content = message.get("content")
+        print(f"  [debug] Groq finish_reason={choice.get('finish_reason')} "
+              f"message_keys={list(message.keys())} content_len={len(content) if content else 0}")
+        if not content:
+            for key in ("reasoning", "reasoning_content"):
+                if message.get(key):
+                    print(f"  [debug] Groq {key} (ilk 300 karakter): {message[key][:300]!r}")
         return content
     except (requests.RequestException, KeyError, IndexError, ValueError) as exc:
         _print_http_error("Groq", exc)
