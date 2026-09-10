@@ -206,8 +206,8 @@ def load_tenders() -> pd.DataFrame:
 def load_winners() -> pd.DataFrame:
     query = """
         SELECT
-            tc.tender_id, c.name AS winner_name, c.email, c.phone,
-            c.address, c.nuts_code
+            tc.tender_id, c.id AS company_id, c.name AS winner_name, c.email,
+            c.phone, c.address, c.nuts_code
         FROM tender_companies tc
         JOIN companies c ON c.id = tc.company_id
         WHERE tc.role = 'winner'
@@ -257,6 +257,72 @@ def delete_contact(contact_id: int) -> None:
         conn.close()
 
 
+def bulk_verify_contacts(contact_ids: list[int]) -> None:
+    if not contact_ids:
+        return
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE contacts SET verified = true WHERE id = ANY(%s)", (contact_ids,))
+    finally:
+        conn.close()
+
+
+def bulk_delete_contacts(contact_ids: list[int]) -> None:
+    if not contact_ids:
+        return
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM tender_contacts WHERE contact_id = ANY(%s)", (contact_ids,))
+                cur.execute("DELETE FROM contacts WHERE id = ANY(%s)", (contact_ids,))
+    finally:
+        conn.close()
+
+
+def update_tender(tender_id: int, category: str | None, status: str | None) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tenders SET category = %s, category_source = 'human', status = %s WHERE id = %s",
+                    (category, status, tender_id),
+                )
+    finally:
+        conn.close()
+
+
+def delete_tender(tender_id: int) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM email_drafts WHERE tender_id = %s", (tender_id,))
+                cur.execute("DELETE FROM tender_contacts WHERE tender_id = %s", (tender_id,))
+                cur.execute("DELETE FROM classification_training_data WHERE tender_id = %s", (tender_id,))
+                cur.execute("DELETE FROM tender_companies WHERE tender_id = %s", (tender_id,))
+                cur.execute("DELETE FROM tenders WHERE id = %s", (tender_id,))
+    finally:
+        conn.close()
+
+
+def update_company(company_id: int, email: str | None, phone: str | None,
+                    address: str | None, nuts_code: str | None) -> None:
+    conn = get_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE companies SET email = %s, phone = %s, address = %s, nuts_code = %s WHERE id = %s",
+                    (email, phone, address, nuts_code, company_id),
+                )
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Baslik
 # ---------------------------------------------------------------------------
@@ -273,13 +339,6 @@ st.markdown(
 
 tenders = load_tenders()
 winners = load_winners()
-
-if tenders.empty:
-    st.info(
-        "DB'de henüz ihale yok. Önce `scripts/ted_ingest.py` çalıştırılmalı "
-        "(veya günlük otomatik taramanın ilk çalışmasını bekle)."
-    )
-    st.stop()
 
 tenders = tenders.copy()
 tenders["kategori_gorunum"] = tenders["category"].apply(category_label)
@@ -315,14 +374,21 @@ tab_ihaleler, tab_kisiler, tab_yeni_tarama = st.tabs(
 )
 
 with tab_ihaleler:
+    if tenders.empty:
+        st.info(
+            "DB'de henüz ihale yok. **🔍 Yeni Tarama** sekmesinden hemen bir tarama başlatabilirsin, "
+            "ya da günlük otomatik taramanın ilk çalışmasını bekleyebilirsin."
+        )
+
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Toplam ihale", len(tenders))
     col2.metric("Kategorize edilen", int(tenders["category"].notna().sum()))
     col3.metric("Kazananı bulunan", int(tenders["id"].isin(winners["tender_id"]).sum()))
     col4.metric("Toplam tahmini değer", format_eur(tenders["value_eur"].sum()))
 
-    st.subheader("Kategoriye göre dağılım")
-    st.bar_chart(tenders["kategori_gorunum"].value_counts())
+    if not tenders.empty:
+        st.subheader("Kategoriye göre dağılım")
+        st.bar_chart(tenders["kategori_gorunum"].value_counts())
 
     st.subheader(f"İhaleler ({len(filtered)})")
     st.dataframe(
@@ -372,6 +438,72 @@ with tab_ihaleler:
                 hide_index=True,
             )
 
+            st.markdown("**✏️ Kazanan şirket bilgilerini güncelle** *(ör. yeni bir telefon numarası öğrendiysen)*")
+            for _, wrow in tender_winners.iterrows():
+                with st.form(key=f"company_form_{int(wrow['company_id'])}"):
+                    st.write(f"🏢 {wrow['winner_name']}")
+                    fc1, fc2 = st.columns(2)
+                    new_email = fc1.text_input("E-posta", value="" if _is_empty(wrow["email"]) else wrow["email"])
+                    new_phone = fc2.text_input("Telefon", value="" if _is_empty(wrow["phone"]) else wrow["phone"])
+                    fc3, fc4 = st.columns(2)
+                    new_address = fc3.text_input("Adres", value="" if _is_empty(wrow["address"]) else wrow["address"])
+                    new_nuts = fc4.text_input("NUTS Kodu", value="" if _is_empty(wrow["nuts_code"]) else wrow["nuts_code"])
+                    if st.form_submit_button("💾 Şirket bilgilerini kaydet"):
+                        update_company(
+                            int(wrow["company_id"]), new_email or None, new_phone or None,
+                            new_address or None, new_nuts or None,
+                        )
+                        load_winners.clear()
+                        st.success("Şirket bilgileri güncellendi.")
+                        st.rerun()
+
+        st.divider()
+        st.markdown("**✏️ İhaleyi düzenle / sil**")
+        current_row = tenders.loc[tenders["id"] == selected_tender_id].iloc[0]
+        current_category = None if _is_empty(current_row["category"]) else current_row["category"]
+        current_status = None if _is_empty(current_row["status"]) else current_row["status"]
+        category_options = [None] + list(CATEGORY_LABELS.keys())
+        status_options = [None] + list(STATUS_LABELS.keys())
+
+        col_cat, col_status = st.columns(2)
+        with col_cat:
+            new_category = st.selectbox(
+                "Kategori",
+                category_options,
+                index=category_options.index(current_category) if current_category in category_options else 0,
+                format_func=lambda c: category_label(c) if c else CATEGORY_FALLBACK,
+                key=f"cat_{selected_tender_id}",
+            )
+        with col_status:
+            new_status = st.selectbox(
+                "Durum",
+                status_options,
+                index=status_options.index(current_status) if current_status in status_options else 0,
+                format_func=lambda s: status_label(s) if s else STATUS_FALLBACK,
+                key=f"status_{selected_tender_id}",
+            )
+
+        col_save_t, col_del_t = st.columns(2)
+        with col_save_t:
+            if st.button("💾 İhale bilgilerini kaydet", key=f"save_tender_{selected_tender_id}", width="stretch"):
+                update_tender(int(selected_tender_id), new_category, new_status)
+                load_tenders.clear()
+                st.success("İhale güncellendi.")
+                st.rerun()
+        with col_del_t:
+            confirm_delete = st.checkbox(
+                "Silmek istediğimden eminim (geri alınamaz)", key=f"confirm_del_{selected_tender_id}",
+            )
+            if st.button("🗑️ Bu ihaleyi sil", key=f"del_tender_{selected_tender_id}", width="stretch"):
+                if confirm_delete:
+                    delete_tender(int(selected_tender_id))
+                    load_tenders.clear()
+                    load_winners.clear()
+                    st.success("İhale silindi.")
+                    st.rerun()
+                else:
+                    st.warning("Önce yandaki onay kutusunu işaretle.")
+
 with tab_kisiler:
     st.subheader("👤 Bulunan kişiler")
     st.caption(
@@ -398,12 +530,13 @@ with tab_kisiler:
             st.success("Onay bekleyen kişi yok - hepsi incelendi. 🎉")
         else:
             display_contacts = display_contacts.assign(
-                kaynak_gorunum=display_contacts["source"].apply(source_label)
+                kaynak_gorunum=display_contacts["source"].apply(source_label),
+                sil=False,
             )
             edited = st.data_editor(
                 display_contacts[[
                     "id", "company_name", "full_name", "title", "email", "phone",
-                    "kaynak_gorunum", "verified",
+                    "kaynak_gorunum", "verified", "sil",
                 ]].rename(columns={
                     "id": "ID",
                     "company_name": "Şirket",
@@ -413,19 +546,21 @@ with tab_kisiler:
                     "phone": "Telefon",
                     "kaynak_gorunum": "Kaynak",
                     "verified": "Onaylandı",
+                    "sil": "Sil",
                 }),
                 column_config={
                     "ID": st.column_config.NumberColumn(disabled=True),
                     "Şirket": st.column_config.TextColumn(disabled=True),
                     "Kaynak": st.column_config.TextColumn(disabled=True),
                     "Onaylandı": st.column_config.CheckboxColumn(),
+                    "Sil": st.column_config.CheckboxColumn(help="İşaretleyip 'Seçilenleri sil'e bas"),
                 },
                 hide_index=True,
                 width="stretch",
                 key="contacts_editor",
             )
 
-            col_save, col_del = st.columns([1, 1])
+            col_save, col_verify_all, col_del = st.columns(3)
             with col_save:
                 if st.button("💾 Değişiklikleri kaydet", type="primary", width="stretch"):
                     changed = 0
@@ -443,16 +578,22 @@ with tab_kisiler:
                         st.rerun()
                     else:
                         st.info("Kaydedilecek bir değişiklik yok.")
-            with col_del:
-                to_delete = st.number_input(
-                    "Silinecek kişi ID (yanlış bulunan kayıt için)",
-                    min_value=0, step=1, value=0,
-                )
-                if st.button("🗑️ Kişiyi sil", width="stretch") and to_delete:
-                    delete_contact(int(to_delete))
+            with col_verify_all:
+                if st.button(f"✅ Tümünü onayla ({len(display_contacts)})", width="stretch"):
+                    bulk_verify_contacts(display_contacts["id"].tolist())
                     load_contacts.clear()
-                    st.success(f"ID {int(to_delete)} silindi.")
+                    st.success(f"{len(display_contacts)} kişi onaylandı.")
                     st.rerun()
+            with col_del:
+                if st.button("🗑️ Seçilenleri sil", width="stretch"):
+                    to_delete_ids = edited.loc[edited["Sil"], "ID"].tolist()
+                    if to_delete_ids:
+                        bulk_delete_contacts([int(i) for i in to_delete_ids])
+                        load_contacts.clear()
+                        st.success(f"{len(to_delete_ids)} kişi silindi.")
+                        st.rerun()
+                    else:
+                        st.info("Silmek için en az bir kişinin 'Sil' kutusunu işaretle.")
 
 BUNDESLAND_DISPLAY = [
     "Baden-Württemberg", "Bayern", "Berlin", "Brandenburg", "Bremen",
