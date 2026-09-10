@@ -306,6 +306,7 @@ def classify_with_ollama(prompt: str) -> str | None:
 
 def classify_with_groq(prompt: str) -> str | None:
     api_key = os.getenv("GROQ_API_KEY")
+    print(f"  [debug] GROQ_API_KEY tanimli mi: {bool(api_key)} (uzunluk: {len(api_key) if api_key else 0})")
     if not api_key:
         return None
     try:
