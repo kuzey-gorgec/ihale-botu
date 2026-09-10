@@ -34,8 +34,12 @@ def _get_database_url() -> str | None:
         return None
 
 
-@st.cache_resource
 def get_connection():
+    # Kasitli olarak cache_resource KULLANMIYORUZ: Neon (serverless Postgres)
+    # bos duran baglantilari arka planda kapatiyor (compute suspend), onbelleklenmis
+    # eski bir psycopg2 baglantisi bu durumda "InterfaceError: connection already
+    # closed" ile patlar. Bunun yerine her sorguda taze baglanti aciyoruz - veri
+    # zaten @st.cache_data(ttl=60) ile onbelleklendigi icin bu sik olmuyor.
     database_url = _get_database_url()
     if not database_url:
         st.error(
@@ -46,9 +50,16 @@ def get_connection():
     return psycopg2.connect(database_url)
 
 
+def _run_query(query: str) -> pd.DataFrame:
+    conn = get_connection()
+    try:
+        return pd.read_sql(query, conn)
+    finally:
+        conn.close()
+
+
 @st.cache_data(ttl=60)
 def load_tenders() -> pd.DataFrame:
-    conn = get_connection()
     query = """
         SELECT
             t.id, t.title, t.category, t.category_source, t.status,
@@ -60,12 +71,11 @@ def load_tenders() -> pd.DataFrame:
         LEFT JOIN companies issuer ON issuer.id = tc_issuer.company_id
         ORDER BY t.published_date DESC NULLS LAST, t.id DESC
     """
-    return pd.read_sql(query, conn)
+    return _run_query(query)
 
 
 @st.cache_data(ttl=60)
 def load_winners() -> pd.DataFrame:
-    conn = get_connection()
     query = """
         SELECT
             tc.tender_id, c.name AS winner_name, c.email, c.phone,
@@ -74,7 +84,7 @@ def load_winners() -> pd.DataFrame:
         JOIN companies c ON c.id = tc.company_id
         WHERE tc.role = 'winner'
     """
-    return pd.read_sql(query, conn)
+    return _run_query(query)
 
 
 tenders = load_tenders()
