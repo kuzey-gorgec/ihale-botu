@@ -22,11 +22,26 @@ load_dotenv(PROJECT_ROOT / ".env")
 st.set_page_config(page_title="Almanya Fiber Ihale Botu", layout="wide")
 
 
+def _get_database_url() -> str | None:
+    # Once .env / ortam degiskeni (yerel calistirma), sonra Streamlit Cloud
+    # secrets (orada .env yok, secrets.toml uzerinden gelir).
+    value = os.getenv("DATABASE_URL")
+    if value:
+        return value
+    try:
+        return st.secrets.get("DATABASE_URL")
+    except Exception:
+        return None
+
+
 @st.cache_resource
 def get_connection():
-    database_url = os.getenv("DATABASE_URL")
+    database_url = _get_database_url()
     if not database_url:
-        st.error("DATABASE_URL tanimli degil (.env dosyasina bak)")
+        st.error(
+            "DATABASE_URL tanimli degil. Yerelde .env dosyasina bak, "
+            "Streamlit Cloud'da uygulama Settings > Secrets kismina ekle."
+        )
         st.stop()
     return psycopg2.connect(database_url)
 
